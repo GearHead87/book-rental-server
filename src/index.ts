@@ -1,16 +1,32 @@
-import express, { Request, Response } from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import mysql from 'mysql2/promise';
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import multer from 'multer';
 import path from 'path';
 import 'dotenv/config';
-import { DatabaseConfig } from '../config';
+import { databaseHost, databaseName, databasePassword, databasePort, databaseUser } from './config';
 const app = express();
 const PORT = 3000;
 import cors from 'cors';
 import cookieParser from 'cookie-parser';
 const JWT_SECRET = 'your-secret-key'; // In production, use environment variable
+
+// Extended Request interface to include user property
+interface AuthenticatedRequest extends Request {
+	user?: {
+		id: number;
+		email: string;
+		name: string;
+	};
+}
+
+// Define JWT payload type
+interface JwtPayload {
+	id: number;
+	email: string;
+	name: string;
+}
 
 const corsOptions = {
 	origin: ['http://localhost:5173', 'http://localhost:5174'],
@@ -30,11 +46,11 @@ const upload = multer({ storage: storage });
 
 // MySQL connection pool
 const pool = mysql.createPool({
-	host: DatabaseConfig.databaseHost,
-	user: DatabaseConfig.databaseUser,
-	password: DatabaseConfig.databasePassword,
-	port: DatabaseConfig.databasePort,
-	database: DatabaseConfig.databaseName,
+	host: databaseHost,
+	user: databaseUser,
+	password: databasePassword,
+	port: databasePort,
+	database: databaseName,
 	waitForConnections: true,
 	connectionLimit: 10,
 	queueLimit: 0,
@@ -92,37 +108,33 @@ app.use('/uploads', express.static('uploads'));
 app.use(cookieParser());
 
 // Authentication middleware
-const authenticateToken = (req: Request, res: Response, next: any) => {
+const authenticateToken = (req: AuthenticatedRequest, res: Response, next: NextFunction): void => {
 	const authHeader = req.headers['authorization'];
 	const token = authHeader && authHeader.split(' ')[1];
 
 	if (!token) {
-		return res.status(401).json({ error: 'Authentication required' });
+		res.status(401).json({ error: 'Authentication required' });
+		return;
 	}
 
-	jwt.verify(token, JWT_SECRET, (err: any, user: any) => {
-		if (err) return res.status(403).json({ error: 'Invalid token' });
-		// Attach user to req.user instead of req.body.user
-		req.user = user;
+	jwt.verify(token, JWT_SECRET, (err: any, decoded: any) => {
+		if (err) {
+			res.status(403).json({ error: 'Invalid token' });
+			return;
+		}
+
+		req.user = decoded as JwtPayload;
 		next();
 	});
 };
 
-// Extended Request interface to include user property
-interface AuthenticatedRequest extends Request {
-	user?: {
-		id: number;
-		email: string;
-		name: string;
-	};
-}
-
 // Register endpoint
-app.post('/register', async (req: Request, res: Response) => {
+app.post('/register', async (req: Request, res: Response): Promise<void> => {
 	const { name, email, password } = req.body;
 
 	if (!name || !email || !password) {
-		return res.status(400).json({ error: 'All fields are required' });
+		res.status(400).json({ error: 'All fields are required' });
+		return;
 	}
 
 	try {
@@ -135,28 +147,31 @@ app.post('/register', async (req: Request, res: Response) => {
 		res.status(201).json({ message: 'User registered successfully' });
 	} catch (error: any) {
 		if (error.code === 'ER_DUP_ENTRY') {
-			return res.status(400).json({ error: 'Email already exists' });
+			res.status(400).json({ error: 'Email already exists' });
+			return;
 		}
 		res.status(500).json({ error: 'Error registering user' });
 	}
 });
 
 // Login endpoint
-app.post('/login', async (req: Request, res: Response) => {
+app.post('/login', async (req: Request, res: Response): Promise<void> => {
 	const { email, password } = req.body;
 
 	try {
 		const [rows]: any = await pool.query('SELECT * FROM users WHERE email = ?', [email]);
 
 		if (rows.length === 0) {
-			return res.status(400).json({ error: 'User not found' });
+			res.status(400).json({ error: 'User not found' });
+			return;
 		}
 
 		const user = rows[0];
 		const validPassword = await bcrypt.compare(password, user.password);
 
 		if (!validPassword) {
-			return res.status(400).json({ error: 'Invalid password' });
+			res.status(400).json({ error: 'Invalid password' });
+			return;
 		}
 
 		const token = jwt.sign({ id: user.id, email: user.email, name: user.name }, JWT_SECRET, {
@@ -174,11 +189,12 @@ app.post(
 	'/post-book',
 	authenticateToken,
 	upload.single('image'),
-	async (req: AuthenticatedRequest, res: Response) => {
+	async (req: AuthenticatedRequest, res: Response): Promise<void> => {
 		const { book_name, author, published_date } = req.body;
 		const userId = req.user?.id; // Get user ID from req.user instead of req.body.user
 		if (!userId) {
-			return res.status(401).json({ error: 'User ID not found' });
+			res.status(401).json({ error: 'User ID not found' });
+			return;
 		}
 
 		const imagePath = req.file
@@ -203,7 +219,7 @@ app.patch(
 	'/update-book/:id',
 	authenticateToken,
 	upload.single('image'),
-	async (req: AuthenticatedRequest, res: Response) => {
+	async (req: AuthenticatedRequest, res: Response): Promise<void> => {
 		const bookId = req.params.id;
 		const userId = req.user?.id;
 		const { book_name, author, published_date } = req.body;
@@ -217,7 +233,8 @@ app.patch(
 			);
 
 			if (rows.length === 0) {
-				return res.status(403).json({ error: 'Unauthorized to update this book' });
+				res.status(403).json({ error: 'Unauthorized to update this book' });
+				return;
 			}
 
 			const updateFields = [];
@@ -241,7 +258,8 @@ app.patch(
 			}
 
 			if (updateFields.length === 0) {
-				return res.status(400).json({ error: 'No fields to update' });
+				res.status(400).json({ error: 'No fields to update' });
+				return;
 			}
 
 			updateValues.push(bookId, userId);
@@ -262,7 +280,7 @@ app.patch(
 app.delete(
 	'/delete-book/:id',
 	authenticateToken,
-	async (req: AuthenticatedRequest, res: Response) => {
+	async (req: AuthenticatedRequest, res: Response): Promise<void> => {
 		const bookId = req.params.id;
 		const userId = req.user?.id;
 
@@ -273,9 +291,10 @@ app.delete(
 			);
 
 			if (result.affectedRows === 0) {
-				return res
-					.status(403)
-					.json({ error: 'Unauthorized to delete this book or book not found' });
+				res.status(403).json({
+					error: 'Unauthorized to delete this book or book not found',
+				});
+				return;
 			}
 
 			res.json({ message: 'Book deleted successfully' });
@@ -302,7 +321,7 @@ app.get('/books', async (req: Request, res: Response) => {
 });
 
 // Get single book endpoint
-app.get('/books/:id', async (req: Request, res: Response) => {
+app.get('/books/:id', async (req: Request, res: Response): Promise<void> => {
 	const bookId = req.params.id;
 
 	try {
@@ -318,7 +337,8 @@ app.get('/books/:id', async (req: Request, res: Response) => {
 		);
 
 		if (rows.length === 0) {
-			return res.status(404).json({ error: 'Book not found' });
+			res.status(404).json({ error: 'Book not found' });
+			return;
 		}
 
 		res.json(rows[0]);
@@ -329,63 +349,70 @@ app.get('/books/:id', async (req: Request, res: Response) => {
 });
 
 // Rent book endpoint
-app.post('/rent-book/:id', authenticateToken, async (req: AuthenticatedRequest, res: Response) => {
-	const bookId = req.params.id;
-	const userId = req.user?.id;
+app.post(
+	'/rent-book/:id',
+	authenticateToken,
+	async (req: AuthenticatedRequest, res: Response): Promise<void> => {
+		const bookId = req.params.id;
+		const userId = req.user?.id;
 
-	const connection = await pool.getConnection();
+		const connection = await pool.getConnection();
 
-	try {
-		await connection.beginTransaction();
+		try {
+			await connection.beginTransaction();
 
-		// Check if the book is available and not owned by the requesting user
-		const [bookRows]: any = await connection.query(
-			'SELECT user_id, rented FROM books WHERE id = ?',
-			[bookId]
-		);
+			// Check if the book is available and not owned by the requesting user
+			const [bookRows]: any = await connection.query(
+				'SELECT user_id, rented FROM books WHERE id = ?',
+				[bookId]
+			);
 
-		if (bookRows.length === 0) {
+			if (bookRows.length === 0) {
+				await connection.rollback();
+				res.status(404).json({ error: 'Book not found' });
+				return;
+			}
+
+			const book = bookRows[0];
+
+			if (book.user_id === userId) {
+				await connection.rollback();
+				res.status(400).json({ error: 'You cannot rent your own book' });
+				return;
+			}
+
+			if (book.rented) {
+				await connection.rollback();
+				res.status(400).json({ error: 'Book is already rented' });
+				return;
+			}
+
+			// Create rental record
+			await connection.query('INSERT INTO rentals (book_id, user_id) VALUES (?, ?)', [
+				bookId,
+				userId,
+			]);
+
+			// Update book status to rented
+			await connection.query('UPDATE books SET rented = TRUE WHERE id = ?', [bookId]);
+
+			await connection.commit();
+			res.json({ message: 'Book rented successfully' });
+		} catch (error) {
 			await connection.rollback();
-			return res.status(404).json({ error: 'Book not found' });
+			console.error('Error renting book:', error);
+			res.status(500).json({ error: 'Error renting book' });
+		} finally {
+			connection.release();
 		}
-
-		const book = bookRows[0];
-
-		if (book.user_id === userId) {
-			await connection.rollback();
-			return res.status(400).json({ error: 'You cannot rent your own book' });
-		}
-
-		if (book.rented) {
-			await connection.rollback();
-			return res.status(400).json({ error: 'Book is already rented' });
-		}
-
-		// Create rental record
-		await connection.query('INSERT INTO rentals (book_id, user_id) VALUES (?, ?)', [
-			bookId,
-			userId,
-		]);
-
-		// Update book status to rented
-		await connection.query('UPDATE books SET rented = TRUE WHERE id = ?', [bookId]);
-
-		await connection.commit();
-		res.json({ message: 'Book rented successfully' });
-	} catch (error) {
-		await connection.rollback();
-		console.error('Error renting book:', error);
-		res.status(500).json({ error: 'Error renting book' });
-	} finally {
-		connection.release();
 	}
-});
+);
 
 // Optional: Add endpoint to return a book
 app.post(
 	'/return-book/:id',
 	authenticateToken,
-	async (req: AuthenticatedRequest, res: Response) => {
+	async (req: AuthenticatedRequest, res: Response): Promise<void> => {
 		const bookId = req.params.id;
 		const userId = req.user?.id;
 
@@ -402,7 +429,8 @@ app.post(
 
 			if (rentalRows.length === 0) {
 				await connection.rollback();
-				return res.status(400).json({ error: 'No active rental found for this book' });
+				res.status(400).json({ error: 'No active rental found for this book' });
+				return;
 			}
 
 			// Update rental record
