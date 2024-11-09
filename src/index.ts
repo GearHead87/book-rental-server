@@ -177,7 +177,6 @@ app.post(
 	async (req: AuthenticatedRequest, res: Response) => {
 		const { book_name, author, published_date } = req.body;
 		const userId = req.user?.id; // Get user ID from req.user instead of req.body.user
-		console.log(userId);
 		if (!userId) {
 			return res.status(401).json({ error: 'User ID not found' });
 		}
@@ -299,6 +298,33 @@ app.get('/books', async (req: Request, res: Response) => {
 		res.json(rows);
 	} catch (error) {
 		res.status(500).json({ error: 'Error fetching books' });
+	}
+});
+
+// Get single book endpoint
+app.get('/books/:id', async (req: Request, res: Response) => {
+	const bookId = req.params.id;
+
+	try {
+		const [rows]: any = await pool.query(
+			`
+            SELECT b.id, b.image_path, b.book_name, b.author, b.published_date, b.rented,
+                   u.name as user_name, u.id as user_id
+            FROM books b
+            JOIN users u ON b.user_id = u.id
+            WHERE b.id = ?
+        `,
+			[bookId]
+		);
+
+		if (rows.length === 0) {
+			return res.status(404).json({ error: 'Book not found' });
+		}
+
+		res.json(rows[0]);
+	} catch (error) {
+		console.error('Error fetching book:', error);
+		res.status(500).json({ error: 'Error fetching book details' });
 	}
 });
 
